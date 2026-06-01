@@ -111,10 +111,11 @@ class TelegramChannel extends NotificationChannel {
         const token = this._generateToken();
         
         // Get current tmux session and conversation content
-        const tmuxSession = this._getCurrentTmuxSession();
-        if (tmuxSession && !notification.metadata) {
+        const tmuxSession = notification.metadata?.tmuxSession || this.config.tmuxSession || process.env.TMUX_SESSION || this._getCurrentTmuxSession();
+        if (tmuxSession && (!notification.metadata?.userQuestion || !notification.metadata?.claudeResponse)) {
             const conversation = this.tmuxMonitor.getRecentConversation(tmuxSession);
             notification.metadata = {
+                ...notification.metadata,
                 userQuestion: conversation.userQuestion || notification.message,
                 claudeResponse: conversation.claudeResponse || notification.message,
                 tmuxSession: tmuxSession
@@ -200,8 +201,8 @@ class TelegramChannel extends NotificationChannel {
         }
         
         messageText += `💬 *To send a new command:*\n`;
-        messageText += `Reply with: \`/cmd ${token} <your command>\`\n`;
-        messageText += `Example: \`/cmd ${token} Please analyze this code\``;
+        messageText += `Reply to this message with the exact text you want to send to Claude.\n`;
+        messageText += `Fallback: \`/cmd ${token} <your command>\``;
 
         return messageText;
     }

@@ -73,8 +73,9 @@ class TelegramWebhookHandler {
     async _handleMessage(message) {
         const chatId = message.chat.id;
         const userId = message.from.id;
-        const messageText = message.text?.trim();
-        
+        const rawMessageText = message.text || '';
+        const messageText = rawMessageText.trim();
+
         if (!messageText) return;
 
         // Check if user is authorized
@@ -96,25 +97,32 @@ class TelegramWebhookHandler {
             return;
         }
 
-        // Parse command
-        const commandMatch = messageText.match(/^\/cmd\s+([A-Z0-9]{8})\s+(.+)$/i);
-        if (!commandMatch) {
-            // Check if it's a direct command without /cmd prefix
-            const directMatch = messageText.match(/^([A-Z0-9]{8})\s+(.+)$/);
-            if (directMatch) {
-                await this._processCommand(chatId, directMatch[1], directMatch[2]);
-            } else {
-                await this._sendMessage(chatId, 
-                    '❌ Invalid format. Use:\n`/cmd <TOKEN> <command>`\n\nExample:\n`/cmd ABC12345 analyze this code`',
-                    { parse_mode: 'Markdown' });
-            }
+        // Keep the legacy token formats working.
+        const commandMatch = messageText.match(/^\/cmd\s+([A-Z0-9]{8})\s+([\s\S]+)$/i);
+        if (commandMatch) {
+            await this._processCommand(chatId, commandMatch[1].toUpperCase(), commandMatch[2]);
             return;
         }
 
-        const token = commandMatch[1].toUpperCase();
-        const command = commandMatch[2];
+        const directMatch = messageText.match(/^([A-Z0-9]{8})\s+([\s\S]+)$/);
+        if (directMatch) {
+            await this._processCommand(chatId, directMatch[1].toUpperCase(), directMatch[2]);
+            return;
+        }
 
-        await this._processCommand(chatId, token, command);
+        const replyToken = this._extractTokenFromMessage(message.reply_to_message);
+        if (replyToken) {
+            await this._processCommand(chatId, replyToken, rawMessageText);
+            return;
+        }
+
+        const latestSession = await this._findLatestSession(chatId);
+        if (latestSession) {
+            await this._processCommand(chatId, latestSession.token, rawMessageText);
+            return;
+        }
+
+        await this._sendMessage(chatId, '❌ No active Claude session found. Please wait for a new task notification, then reply to that notification.');
     }
 
     async _processCommand(chatId, token, command) {
@@ -168,20 +176,20 @@ class TelegramWebhookHandler {
             const token = data.split(':')[1];
             // Send personal chat command format
             await this._sendMessage(chatId,
-                `📝 *Personal Chat Command Format:*\n\n\`/cmd ${token} <your command>\`\n\n*Example:*\n\`/cmd ${token} please analyze this code\`\n\n💡 *Copy and paste the format above, then add your command!*`,
+                `📝 *Personal Chat*\n\nReply directly to the notification with the exact text you want to send to Claude.\n\nFallback format:\n\`/cmd ${token} <your command>\``,
                 { parse_mode: 'Markdown' });
         } else if (data.startsWith('group:')) {
             const token = data.split(':')[1];
             // Send group chat command format with @bot_name
             const botUsername = await this._getBotUsername();
             await this._sendMessage(chatId,
-                `👥 *Group Chat Command Format:*\n\n\`@${botUsername} /cmd ${token} <your command>\`\n\n*Example:*\n\`@${botUsername} /cmd ${token} please analyze this code\`\n\n💡 *Copy and paste the format above, then add your command!*`,
+                `👥 *Group Chat*\n\nReply directly to the notification with the exact text you want to send to Claude.\n\nFallback format:\n\`@${botUsername} /cmd ${token} <your command>\``,
                 { parse_mode: 'Markdown' });
         } else if (data.startsWith('session:')) {
             const token = data.split(':')[1];
             // For backward compatibility - send help message for old callback buttons
             await this._sendMessage(chatId,
-                `📝 *How to send a command:*\n\nType:\n\`/cmd ${token} <your command>\`\n\nExample:\n\`/cmd ${token} please analyze this code\`\n\n💡 *Tip:* New notifications have a button that auto-fills the command for you!`,
+                `📝 *How to send a command:*\n\nReply directly to the notification with the exact text you want to send to Claude.\n\nFallback:\n\`/cmd ${token} <your command>\``,
                 { parse_mode: 'Markdown' });
         }
     }
@@ -189,8 +197,7 @@ class TelegramWebhookHandler {
     async _sendWelcomeMessage(chatId) {
         const message = `🤖 *Welcome to Claude Code Remote Bot!*\n\n` +
             `I'll notify you when Claude completes tasks or needs input.\n\n` +
-            `When you receive a notification with a token, you can send commands back using:\n` +
-            `\`/cmd <TOKEN> <your command>\`\n\n` +
+            `Reply directly to a notification with the exact text you want to send to Claude.\n\n` +
             `Type /help for more information.`;
         
         await this._sendMessage(chatId, message, { parse_mode: 'Markdown' });
@@ -200,14 +207,11 @@ class TelegramWebhookHandler {
         const message = `📚 *Claude Code Remote Bot Help*\n\n` +
             `*Commands:*\n` +
             `• \`/start\` - Welcome message\n` +
-            `• \`/help\` - Show this help\n` +
-            `• \`/cmd <TOKEN> <command>\` - Send command to Claude\n\n` +
-            `*Example:*\n` +
-            `\`/cmd ABC12345 analyze the performance of this function\`\n\n` +
-            `*Tips:*\n` +
-            `• Tokens are case-insensitive\n` +
-            `• Tokens expire after 24 hours\n` +
-            `• You can also just type \`TOKEN command\` without /cmd`;
+            `• \`/help\` - Show this help\n\n` +
+            `*Send to Claude:*\n` +
+            `Reply directly to a task notification. The full text you send will be forwarded to Claude.\n\n` +
+            `*Fallback:*\n` +
+            `\`/cmd <TOKEN> <command>\` or \`TOKEN command\``;
         
         await this._sendMessage(chatId, message, { parse_mode: 'Markdown' });
     }
@@ -254,24 +258,58 @@ class TelegramWebhookHandler {
         return this.config.botUsername || 'claude_remote_bot';
     }
 
-    async _findSessionByToken(token) {
-        const files = fs.readdirSync(this.sessionsDir);
-        
-        for (const file of files) {
-            if (!file.endsWith('.json')) continue;
-            
-            const sessionPath = path.join(this.sessionsDir, file);
-            try {
-                const session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
-                if (session.token === token) {
-                    return session;
-                }
-            } catch (error) {
-                this.logger.error(`Failed to read session file ${file}:`, error.message);
+    _extractTokenFromMessage(message) {
+        if (!message?.text) return null;
+
+        const tokenMatch = message.text.match(/Session Token:\*?\s*`?([A-Z0-9]{8})`?/i) ||
+            message.text.match(/\/cmd\s+([A-Z0-9]{8})/i) ||
+            message.text.match(/\b([A-Z0-9]{8})\b/);
+
+        return tokenMatch ? tokenMatch[1].toUpperCase() : null;
+    }
+
+    async _findLatestSession(chatId) {
+        const now = Math.floor(Date.now() / 1000);
+        const sessions = [];
+
+        for (const file of this._listSessionFiles()) {
+            const session = this._readSessionFile(file);
+            if (session && session.expiresAt >= now) {
+                sessions.push(session);
             }
         }
-        
+
+        sessions.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return sessions[0] || null;
+    }
+
+    async _findSessionByToken(token) {
+        for (const file of this._listSessionFiles()) {
+            const session = this._readSessionFile(file);
+            if (session && session.token === token) {
+                return session;
+            }
+        }
+
         return null;
+    }
+
+    _listSessionFiles() {
+        if (!fs.existsSync(this.sessionsDir)) {
+            return [];
+        }
+
+        return fs.readdirSync(this.sessionsDir).filter(file => file.endsWith('.json'));
+    }
+
+    _readSessionFile(file) {
+        const sessionPath = path.join(this.sessionsDir, file);
+        try {
+            return JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+        } catch (error) {
+            this.logger.error(`Failed to read session file ${file}:`, error.message);
+            return null;
+        }
     }
 
     async _removeSession(sessionId) {

@@ -407,7 +407,7 @@ class TmuxMonitor extends EventEmitter {
      * @param {number} lines - Number of lines to retrieve
      * @returns {Object} - { userQuestion, claudeResponse }
      */
-    getRecentConversation(sessionName, lines = 200) {
+    getRecentConversation(sessionName, lines = 1000) {
         try {
             const captureFile = path.join(this.captureDir, `${sessionName}.log`);
             
@@ -433,7 +433,7 @@ class TmuxMonitor extends EventEmitter {
      * @param {string} sessionName - The tmux session name
      * @param {number} lines - Number of lines to retrieve
      */
-    getFromTmuxBuffer(sessionName, lines = 200) {
+    getFromTmuxBuffer(sessionName, lines = 1000) {
         try {
             // Capture the pane contents
             const buffer = execSync(`tmux capture-pane -t ${sessionName} -p -S -${lines}`, {
@@ -608,94 +608,57 @@ class TmuxMonitor extends EventEmitter {
      */
     extractConversation(text, sessionName = null) {
         const lines = text.split('\n');
-        
         let userQuestion = '';
-        let claudeResponse = '';
         let responseLines = [];
-        let inResponse = false;
+        let lastUserInputIndex = -1;
+        let lastAssistantIndex = -1;
 
-        // Find the most recent user question and Claude response
-        let inUserInput = false;
-        let userQuestionLines = [];
-        
-        for (let i = 0; i < lines.length; i++) {
+        for (let i = lines.length - 1; i >= 0; i--) {
             const line = lines[i].trim();
-            
-            // Detect user input (line starting with "> " followed by content)
-            if (line.startsWith('> ') && line.length > 2) {
-                userQuestionLines = [line.substring(2).trim()];
-                inUserInput = true;
-                inResponse = false; // Reset response capture
-                responseLines = []; // Clear previous response
-                
-                // Record user input timestamp if session name provided
-                if (sessionName) {
-                    this.traceCapture.recordUserInput(sessionName);
-                }
-                
-                continue;
-            }
-            
-            // Continue capturing multi-line user input
-            if (inUserInput && !line.startsWith('⏺') && line.length > 0) {
-                userQuestionLines.push(line);
-                continue;
-            }
-            
-            // End of user input
-            if (inUserInput && (line.startsWith('⏺') || line.length === 0)) {
-                inUserInput = false;
-                userQuestion = userQuestionLines.join(' ');
-            }
-            
-            // Detect Claude response (line starting with "⏺ " or other response indicators)
-            if (line.startsWith('⏺ ') || 
-                (inResponse && line.length > 0 && 
-                 !line.startsWith('╭') && !line.startsWith('│') && !line.startsWith('╰') &&
-                 !line.startsWith('> ') && !line.includes('? for shortcuts'))) {
-                
-                if (line.startsWith('⏺ ')) {
-                    inResponse = true;
-                    responseLines = [line.substring(2).trim()]; // Remove "⏺ " prefix
-                } else if (inResponse) {
-                    responseLines.push(line);
-                }
-            }
-            
-            // Stop capturing response when we hit another prompt or box boundary
-            if (inResponse && (line.startsWith('╭') || line.startsWith('│ > ') || line.includes('? for shortcuts'))) {
-                inResponse = false;
+            const userMatch = line.match(/^(?:❯|>)\s+(.+)$/);
+            if (userMatch && !line.startsWith('> node ')) {
+                userQuestion = userMatch[1].trim();
+                lastUserInputIndex = i;
+                break;
             }
         }
 
-        // Join response lines and clean up
-        claudeResponse = responseLines.join('\n').trim();
-        
-        // Remove box characters but preserve formatting
-        claudeResponse = claudeResponse
-            .replace(/[╭╰│]/g, '')
-            .replace(/^\s*│\s*/gm, '')
-            // Don't collapse multiple spaces - preserve code formatting
-            // .replace(/\s+/g, ' ')
-            .trim();
+        if (sessionName && lastUserInputIndex >= 0) {
+            this.traceCapture.recordUserInput(sessionName);
+        }
 
-        // Don't limit response length - we want the full response
-        // if (claudeResponse.length > 500) {
-        //     claudeResponse = claudeResponse.substring(0, 497) + '...';
-        // }
+        const isToolInvocation = (content) => /^(?:Bash|Read|Edit|Write|Update|TaskCreate|TaskUpdate|TaskList|TaskGet|Agent|Skill|NotebookEdit|WebFetch|WebSearch|AskUserQuestion|ExitPlanMode|EnterPlanMode|multi_tool_use)\(/.test(content);
+        const responseSearchStart = lastUserInputIndex >= 0 ? lastUserInputIndex + 1 : 0;
+        for (let i = responseSearchStart; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.startsWith('● ') || line.startsWith('⏺ ')) {
+                const content = line.replace(/^(?:●|⏺)\s+/, '').trim();
+                if (!isToolInvocation(content)) {
+                    lastAssistantIndex = i;
+                }
+            }
+        }
 
-        // If we didn't find a question in the standard format, look for any recent text input
-        if (!userQuestion) {
-            for (let i = lines.length - 1; i >= 0; i--) {
+        if (lastAssistantIndex >= 0) {
+            responseLines = [lines[lastAssistantIndex].trim().replace(/^(?:●|⏺)\s+/, '')];
+            for (let i = lastAssistantIndex + 1; i < lines.length; i++) {
                 const line = lines[i].trim();
-                if (line.startsWith('> ') && line.length > 2) {
-                    userQuestion = line.substring(2).trim();
+                if (line.startsWith('❯') || line.startsWith('> ') || line.startsWith('● ') || line.startsWith('⏺ ') || line.includes('? for shortcuts')) {
                     break;
                 }
+                if (line.startsWith('╭') || line.startsWith('╰') || line.match(/^│\s*>/)) {
+                    break;
+                }
+                responseLines.push(lines[i]);
             }
         }
 
-        return { 
+        const claudeResponse = responseLines.join('\n')
+            .replace(/[╭╰│]/g, '')
+            .replace(/^\s*│\s*/gm, '')
+            .trim();
+
+        return {
             userQuestion: userQuestion || 'No user input',
             claudeResponse: claudeResponse || 'No Claude response'
         };

@@ -114,8 +114,10 @@ async function sendHookNotification() {
             type: notificationType,
             title: `Claude ${notificationType === 'completed' ? 'Task Completed' : 'Waiting for Input'}`,
             message: `Claude has ${notificationType === 'completed' ? 'completed a task' : 'is waiting for input'}`,
-            project: projectName
-            // Don't set metadata here - let TelegramChannel extract real conversation content
+            project: projectName,
+            metadata: {
+                tmuxSession: tmuxSession
+            }
         };
         
         console.log(`📱 Sending ${notificationType} notification for project: ${projectName}`);
