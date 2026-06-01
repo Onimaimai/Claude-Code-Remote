@@ -649,6 +649,9 @@ class TmuxMonitor extends EventEmitter {
                 if (line.startsWith('╭') || line.startsWith('╰') || line.match(/^│\s*>/)) {
                     break;
                 }
+                if (this._isClaudeStatusLine(line) || this._isSeparatorLine(line)) {
+                    continue;
+                }
                 responseLines.push(lines[i]);
             }
         }
@@ -662,6 +665,16 @@ class TmuxMonitor extends EventEmitter {
             userQuestion: userQuestion || 'No user input',
             claudeResponse: claudeResponse || 'No Claude response'
         };
+    }
+
+    _isClaudeStatusLine(line) {
+        return /^[✢✻✽✶✳✷✸✹✺✦✧]\s/.test(line) ||
+            /\b(?:Spelunking|Thinking|Herding|Clauding|Crunching|Processing|Working)\b/.test(line) ||
+            /\(running .*hook.*\)/.test(line);
+    }
+
+    _isSeparatorLine(line) {
+        return /^[─━═╌╍-]{20,}$/.test(line);
     }
 
     /**

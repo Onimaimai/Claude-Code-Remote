@@ -146,7 +146,9 @@ class TelegramWebhookHandler {
 
         try {
             // Inject command into tmux session
-            const tmuxSession = session.tmuxSession || 'default';
+            const tmuxSession = session.tmuxSession && session.tmuxSession !== 'default'
+                ? session.tmuxSession
+                : (process.env.TMUX_SESSION || 'default');
             await this.injector.injectCommand(command, tmuxSession);
             
             // Send confirmation

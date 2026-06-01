@@ -36,13 +36,23 @@ const TelegramChannel = require('./src/channels/telegram/telegram');
 const DesktopChannel = require('./src/channels/local/desktop');
 const EmailChannel = require('./src/channels/email/smtp');
 
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function sendHookNotification() {
     try {
         console.log('🔔 Claude Hook: Sending notifications...');
-        
+
+        // Give Claude Code a moment to finish rendering the final response into tmux.
+        const notificationDelay = parseInt(process.env.NOTIFICATION_CAPTURE_DELAY_MS || '2000', 10);
+        if (notificationDelay > 0) {
+            await delay(notificationDelay);
+        }
+
         // Get notification type from command line argument
         const notificationType = process.argv[2] || 'completed';
-        
+
         const channels = [];
         const results = [];
         

@@ -125,13 +125,13 @@ class TelegramChannel extends NotificationChannel {
         // Create session record
         await this._createSession(sessionId, notification, token);
 
-        // Generate Telegram message
-        const messageText = this._generateTelegramMessage(notification, sessionId, token);
-        
+        // Generate Telegram messages
+        const messageParts = this._generateTelegramMessages(notification, sessionId, token);
+
         // Determine recipient (chat or group)
         const chatId = this.config.groupId || this.config.chatId;
         const isGroupChat = !!this.config.groupId;
-        
+
         // Create buttons using callback_data instead of inline query
         // This avoids the automatic @bot_name addition
         const buttons = [
@@ -141,27 +141,32 @@ class TelegramChannel extends NotificationChannel {
                     callback_data: `personal:${token}`
                 },
                 {
-                    text: '👥 Group Chat', 
+                    text: '👥 Group Chat',
                     callback_data: `group:${token}`
                 }
             ]
         ];
-        
-        const requestData = {
-            chat_id: chatId,
-            text: messageText,
-            parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: buttons
-            }
-        };
 
         try {
-            const response = await axios.post(
-                `${this.apiBaseUrl}/bot${this.config.botToken}/sendMessage`,
-                requestData,
-                this._getNetworkOptions()
-            );
+            for (let i = 0; i < messageParts.length; i++) {
+                const requestData = {
+                    chat_id: chatId,
+                    text: messageParts[i],
+                    parse_mode: 'Markdown'
+                };
+
+                if (i === messageParts.length - 1) {
+                    requestData.reply_markup = {
+                        inline_keyboard: buttons
+                    };
+                }
+
+                await axios.post(
+                    `${this.apiBaseUrl}/bot${this.config.botToken}/sendMessage`,
+                    requestData,
+                    this._getNetworkOptions()
+                );
+            }
 
             this.logger.info(`Telegram message sent successfully, Session: ${sessionId}`);
             return true;
@@ -173,38 +178,73 @@ class TelegramChannel extends NotificationChannel {
         }
     }
 
-    _generateTelegramMessage(notification, sessionId, token) {
+    _generateTelegramMessages(notification, sessionId, token) {
         const type = notification.type;
         const emoji = type === 'completed' ? '✅' : '⏳';
         const status = type === 'completed' ? 'Completed' : 'Waiting for Input';
-        
-        let messageText = `${emoji} *Claude Task ${status}*\n`;
-        messageText += `*Project:* ${notification.project}\n`;
-        messageText += `*Session Token:* \`${token}\`\n\n`;
-        
-        if (notification.metadata) {
-            if (notification.metadata.userQuestion) {
-                messageText += `📝 *Your Question:*\n${notification.metadata.userQuestion.substring(0, 200)}`;
-                if (notification.metadata.userQuestion.length > 200) {
-                    messageText += '...';
+        const maxLength = 3900;
+        const parts = [];
+
+        let header = `${emoji} *Claude Task ${status}*\n`;
+        header += `*Project:* ${notification.project}\n`;
+        header += `*Session Token:* \`${token}\`\n\n`;
+
+        const sections = [];
+        if (notification.metadata?.userQuestion) {
+            sections.push(`📝 *Your Question:*\n${notification.metadata.userQuestion}`);
+        }
+        if (notification.metadata?.claudeResponse) {
+            sections.push(`🤖 *Claude Response:*\n${notification.metadata.claudeResponse}`);
+        }
+
+        let currentPart = header;
+        for (const section of sections) {
+            for (const chunk of this._splitTelegramText(section, maxLength)) {
+                const text = `${chunk}\n\n`;
+                if (currentPart.length + text.length > maxLength && currentPart.trim()) {
+                    parts.push(currentPart.trim());
+                    currentPart = '';
                 }
-                messageText += '\n\n';
-            }
-            
-            if (notification.metadata.claudeResponse) {
-                messageText += `🤖 *Claude Response:*\n${notification.metadata.claudeResponse.substring(0, 300)}`;
-                if (notification.metadata.claudeResponse.length > 300) {
-                    messageText += '...';
-                }
-                messageText += '\n\n';
+                currentPart += text;
             }
         }
-        
-        messageText += `💬 *To send a new command:*\n`;
-        messageText += `Reply to this message with the exact text you want to send to Claude.\n`;
-        messageText += `Fallback: \`/cmd ${token} <your command>\``;
 
-        return messageText;
+        const commandHelp = `💬 *To send a new command:*\nReply to this message with the exact text you want to send to Claude.\nFallback: \`/cmd ${token} <your command>\``;
+        if (currentPart.length + commandHelp.length > maxLength && currentPart.trim()) {
+            parts.push(currentPart.trim());
+            currentPart = '';
+        }
+        currentPart += commandHelp;
+        parts.push(currentPart.trim());
+
+        return parts.map((part, index) => parts.length > 1 ? `*Part ${index + 1}/${parts.length}*\n\n${part}` : part);
+    }
+
+    _splitTelegramText(text, maxLength) {
+        if (text.length <= maxLength) {
+            return [text];
+        }
+
+        const chunks = [];
+        let remaining = text;
+        while (remaining.length > maxLength) {
+            let splitAt = remaining.lastIndexOf('\n', maxLength);
+            if (splitAt < maxLength * 0.5) {
+                splitAt = remaining.lastIndexOf(' ', maxLength);
+            }
+            if (splitAt < maxLength * 0.5) {
+                splitAt = maxLength;
+            }
+
+            chunks.push(remaining.slice(0, splitAt).trimEnd());
+            remaining = remaining.slice(splitAt).trimStart();
+        }
+
+        if (remaining) {
+            chunks.push(remaining);
+        }
+
+        return chunks;
     }
 
     async _createSession(sessionId, notification, token) {
